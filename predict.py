@@ -12,16 +12,27 @@ import glob
 
 from torch.utils.data import DataLoader
 import warnings
-
+from pydub import AudioSegment
+import os
 
 warnings.filterwarnings("ignore", message=".*MPEG_LAYER_III subtype is unknown.*")
 
+def convert_audio_to_wav(audio_path):
+    ext = os.path.splitext(audio_path)[1].lower()
+    wav_path = audio_path.replace(ext, ".wav")
+    audio = AudioSegment.from_file(audio_path)
+    audio.export(wav_path, format="wav")
+    return wav_path
+
+
+
 df = pd.read_csv("sample_submission.csv")
 taxonomy=pd.read_csv("taxonomy.csv")
-
+print(torchaudio.list_audio_backends())
 # Forward map: column name → index
 forward_map = {col: i for i, col in enumerate(df.columns[1:])}
-
+def get_species_list():
+    return forward_map.keys()
 # Reverse map: index → column name
 reverse_map = {i: col for col, i in forward_map.items()}
 
@@ -30,6 +41,7 @@ class BirdCLEFDataset:
         input_sr = VGGISH.sample_rate
         self.input_proc = VGGISH.get_input_processor()
         self.audio_path=audio_path
+        self.audio_path=convert_audio_to_wav(self.audio_path)
         self.device = device
         self.target_sample_rate = input_sr
         self.num_samples = 50000
