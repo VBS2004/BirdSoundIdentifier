@@ -156,11 +156,6 @@ Here are some visuals of the application:
 
   ![Species Image](screenshots/Image_Popup.png)
 
-*Note*: Replace `screenshots/*.png` with actual image files. To add screenshots:
-
-1. Take screenshots of the app (e.g., using Snipping Tool or browser dev tools).
-2. Save them in a `screenshots/` folder in the project root.
-3. Update the `![...](...)` paths with the correct filenames (e.g., `screenshots/grid-view.jpg`).
 
 ## Contributing
 
