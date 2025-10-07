@@ -1,9 +1,9 @@
-import { useState, useEffect } from "react";
-import { Mic, Upload, Play, Pause, Volume2, Loader2, Check, AlertCircle, Bird, Waves, Zap, Star, Camera, ExternalLink, Download, Heart } from "lucide-react";
-import './index.css';
-
+import { useState, useEffect, useRef } from "react";
+import { Mic, Upload, Play, Pause, Loader2, Check, Bird, Waves, Zap, Star, Camera, ExternalLink, Download, Heart, Square, RotateCcw } from "lucide-react";
+import "./index.css";
 function PredictPage() {
   const [data, setData] = useState(null);
+  const [showDownloadNotification, setShowDownloadNotification] = useState(false);
   const [val, setVal] = useState("");
   const [confidenceVal, setCV] = useState("");
   const [filename, setFilename] = useState("");
@@ -18,6 +18,22 @@ function PredictPage() {
   const [selectedImage, setSelectedImage] = useState(null);
   const [imagesLoading, setImagesLoading] = useState(false);
 
+  // Audio recording states
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [recordingError, setRecordingError] = useState("");
+  
+  // Audio recording refs
+  const mediaRecorderRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const streamRef = useRef(null);
+  const chunksRef = useRef([]);
+  const timerRef = useRef(null);
+  const animationRef = useRef(null);
+
   useEffect(() => {
     fetch("http://localhost:5000")
       .then((res) => res.json())
@@ -30,22 +46,82 @@ function PredictPage() {
       });
   }, []);
 
-  const loadImages = async (imageUrls) => {
-    setImagesLoading(true);
-    try {
-      const imageList = imageUrls.map((url, index) => ({
-        id: index,
-        url: `http://localhost:5000/${url}`,
-        alt: `${val} - Image ${index + 1}`,
-        loaded: false
-      }));
-      setImages(imageList);
-    } catch (error) {
-      console.error("Error loading images:", error);
-    } finally {
-      setImagesLoading(false);
-    }
-  };
+  useEffect(() => {
+    return () => {
+      // Cleanup on unmount
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    };
+  }, []);
+
+const handleDownload=async(image)=>{
+  try{
+    const url=image.originalUrl || image.largeUrl || image.mediumUrl || image.smallUrl;
+    const response=await fetch(url);
+    if(!response.ok) throw new Error("Failed to fetch image");
+    setShowDownloadNotification(true);
+    const blob=await response.blob();
+    const blobUrl=window.URL.createObjectURL(blob);//Temprorary URL for the blob
+    const link=document.createElement("a");
+    link.href= blobUrl;//Setting url
+    link.download=`${val}_${image.id}.${url.split('.').slice(-1)[0]}`;//File name format Tells the browser to download instead of navigating
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(blobUrl);
+    setTimeout(() => setShowDownloadNotification(false), 2000);
+  }
+  catch(error){
+    console.error("Download error:", error);
+    alert("Failed to download image: " + error.message);
+    setShowDownloadNotification(false);
+  }
+}
+
+const handleViewSource=(image)=>{
+  const sourceUrl=`https://www.pexels.com/photo/${image.pexelsId}/`;
+  window.open(sourceUrl, "_blank"); 
+}
+
+const loadImages = async (imageUrlsData) => {
+  setImagesLoading(true);
+  try {
+    // imageUrlsData is now an array of objects with different size URLs
+    const imageList = imageUrlsData.map((imageData, index) => ({
+      id: index,
+      url: imageData.medium, // Use medium size, or choose another size
+      originalUrl: imageData.original,
+      largeUrl: imageData.large,
+      smallUrl: imageData.small,
+      photographer: imageData.photographer,
+      alt: imageData.alt || `${val} - Image ${index + 1}`,
+      pexelsId: imageData.id,
+      loaded: false
+    }));
+
+    setImages(imageList);
+
+  } catch (error) {
+
+    console.error("Error loading images:", error);
+
+  } finally {
+
+    setImagesLoading(false);
+
+  }
+};
+
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -79,7 +155,6 @@ function PredictPage() {
       setShowResult(true);
       console.log("Image URLs:", data.image_urls);
       
-      // Load images after successful prediction
       if (data.image_urls && data.image_urls.length > 0) {
         await loadImages(data.image_urls);
       } else {
@@ -127,25 +202,150 @@ function PredictPage() {
     }
   };
 
-  const handleRecordingStop = (blob) => {
-    console.log("Recording stopped:", blob);
-    console.log("Blob type:", blob.type);
-    console.log("Blob size:", blob.size);
-    
-    if (!blob || blob.size === 0) {
-      alert("Recording failed - no audio data received");
-      return;
+  // Audio recording functions
+  const startRecording = async () => {
+    try {
+      setRecordingError("");
+      
+      // Request microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100,
+        }
+      });
+      
+      streamRef.current = stream;
+      chunksRef.current = [];
+
+      // Set up audio context for visualization
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      analyserRef.current = audioContextRef.current.createAnalyser();
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+      source.connect(analyserRef.current);
+      
+      analyserRef.current.fftSize = 256;
+      const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+
+      // Audio level monitoring
+      const updateAudioLevel = () => {
+        if (analyserRef.current && isRecording && !isPaused) {
+          analyserRef.current.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+          setAudioLevel(Math.min(100, (average / 255) * 100));
+          animationRef.current = requestAnimationFrame(updateAudioLevel);
+        }
+      };
+
+      // Set up MediaRecorder
+      mediaRecorderRef.current = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+      });
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorderRef.current.onstop = () => {
+        const blob = new Blob(chunksRef.current, { 
+          type: mediaRecorderRef.current.mimeType 
+        });
+        
+        if (blob.size > 0) {
+          const audioFile = new File([blob], `recording_${Date.now()}.webm`, { 
+            type: blob.type,
+            lastModified: Date.now()
+          });
+          
+          setFile(audioFile);
+          setFilename(audioFile.name);
+          setAudioUrl(URL.createObjectURL(audioFile));
+          setShowResult(false);
+          setImages([]);
+        }
+
+        // Cleanup
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+        }
+        if (audioContextRef.current) {
+          audioContextRef.current.close();
+        }
+      };
+
+      // Start recording
+      mediaRecorderRef.current.start(100); // Collect data every 100ms
+      setIsRecording(true);
+      setIsPaused(false);
+      setRecordingTime(0);
+      
+      // Start timer
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+
+      // Start audio level monitoring
+      updateAudioLevel();
+      
+    } catch (error) {
+      console.error("Error starting recording:", error);
+      setRecordingError("Microphone access denied or not available");
     }
-    
-    const audioFile = new File([blob], `recording_${Date.now()}.wav`, { 
-      type: blob.type || "audio/wav",
-      lastModified: Date.now()
-    });
-    
-    setFile(audioFile);
-    setFilename(audioFile.name);
-    setAudioUrl(URL.createObjectURL(audioFile));
-    console.log("Audio file created:", audioFile);
+  };
+
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      if (isPaused) {
+        mediaRecorderRef.current.resume();
+        setIsPaused(false);
+        // Resume timer
+        timerRef.current = setInterval(() => {
+          setRecordingTime(prev => prev + 1);
+        }, 1000);
+      } else {
+        mediaRecorderRef.current.pause();
+        setIsPaused(true);
+        // Pause timer
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+        }
+      }
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      setIsPaused(false);
+      setAudioLevel(0);
+      
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    }
+  };
+
+  const resetRecording = () => {
+    stopRecording();
+    setRecordingTime(0);
+    setFile(null);
+    setFilename("");
+    setAudioUrl(null);
+    setShowResult(false);
+    setImages([]);
+  };
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   const togglePlayback = () => {
@@ -160,6 +360,11 @@ function PredictPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white overflow-hidden relative">
+      {showDownloadNotification && (
+    <div className="fixed top-4 right-4 z-50 px-4 py-2 bg-green-500/90 text-white rounded-xl shadow-lg backdrop-blur-sm animate-slideInOut">
+      Download Started
+    </div>
+  )}
       {/* Animated background elements */}
       <div className="absolute inset-0 overflow-hidden">
         <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
@@ -167,46 +372,8 @@ function PredictPage() {
         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-60 h-60 bg-indigo-500 rounded-full mix-blend-multiply filter blur-xl opacity-10 animate-pulse delay-500"></div>
       </div>
 
-      {/* Header */}
-      <header className="relative z-10 w-full backdrop-blur-md bg-black/20 border-b border-white/10">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg">
-              <Bird className="w-7 h-7 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-                BirdID
-              </h1>
-              <p className="text-xs text-gray-400">AI-Powered Bird Recognition</p>
-            </div>
-          </div>
-          
-          <nav className="hidden md:flex space-x-6">
-            {[
-              ['Dashboard', '/dashboard'],
-              ['Species', '/species'], 
-              ['Analytics', '/analytics'],
-              ['Community', '/community'],
-            ].map(([title, url]) => (
-              <a 
-                key={title}
-                href={url} 
-                className="px-4 py-2 rounded-full text-sm font-medium text-gray-300 hover:text-white hover:bg-white/10 transition-all duration-300 backdrop-blur-sm"
-              >
-                {title}
-              </a>
-            ))}
-          </nav>
 
-          <div className="flex items-center space-x-2">
-            <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-            <span className="text-xs text-green-400 hidden sm:block">AI Online</span>
-          </div>
-        </div>
-      </header>
-
-      <main className="relative z-10 flex-1 max-w-6xl mx-auto px-6 py-12">
+      <main className="relative z-10 flex-1 max-w-6xl mx-auto px-6 py-12 pt-20">
         {/* Hero Section */}
         <div className="text-center mb-16">
           <h2 className="text-5xl md:text-7xl font-black mb-6 bg-gradient-to-r from-white via-blue-200 to-purple-200 bg-clip-text text-transparent leading-tight">
@@ -258,7 +425,7 @@ function PredictPage() {
               <div className={`bg-gradient-to-br from-black/40 to-black/20 backdrop-blur-md border-2 border-dashed rounded-3xl p-12 text-center transition-all duration-300 ${
                 dragOver 
                   ? 'border-blue-400 bg-blue-500/10' 
-                  : 'border-gray-600 hover:border-gray-500 group-hover:bg-white/5'
+                  : 'border-gray-600 hover:border-gray-500'
               }`}>
                 <div className="w-20 h-20 mx-auto mb-6 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                   <Upload className="w-10 h-10 text-white" />
@@ -280,16 +447,100 @@ function PredictPage() {
               </div>
             </div>
           ) : (
+            // Audio Recording Component
             <div className="bg-gradient-to-br from-black/40 to-black/20 backdrop-blur-md border border-white/10 rounded-3xl p-12 text-center">
-              <div className="w-24 h-24 mx-auto mb-8 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center shadow-lg shadow-purple-500/30 hover:shadow-purple-500/50 transition-all duration-300 cursor-pointer">
-                <Mic className="w-10 h-10 text-white" />
+              {/* Recording Visualizer */}
+              <div className="relative mb-8">
+                <div className={`w-32 h-32 mx-auto rounded-full flex items-center justify-center transition-all duration-300 ${
+                  isRecording 
+                    ? 'bg-gradient-to-r from-red-500 to-pink-600 shadow-lg shadow-red-500/50 animate-pulse' 
+                    : 'bg-gradient-to-r from-blue-500 to-purple-600 shadow-lg shadow-purple-500/30'
+                }`}>
+                  <Mic className="w-12 h-12 text-white" />
+                  
+                  {/* Audio level indicator */}
+                  {isRecording && (
+                    <div 
+                      className="absolute inset-0 rounded-full border-4 border-white/30 transition-all duration-100"
+                      style={{ 
+                        transform: `scale(${1 + (audioLevel / 100) * 0.3})`,
+                        opacity: audioLevel / 100 
+                      }}
+                    />
+                  )}
+                </div>
+                
+                {/* Recording timer */}
+                {(isRecording || recordingTime > 0) && (
+                  <div className="mt-4">
+                    <div className="text-3xl font-mono font-bold text-white mb-2">
+                      {formatTime(recordingTime)}
+                    </div>
+                    <div className="flex items-center justify-center space-x-2">
+                      <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
+                      <span className="text-sm text-gray-400">
+                        {isPaused ? 'Paused' : isRecording ? 'Recording' : 'Stopped'}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
-              
-              <h3 className="text-2xl font-bold mb-4">Audio Recording</h3>
-              <p className="text-gray-400 mb-6">Use an audio recording component here</p>
-              <p className="text-sm text-gray-500">
-                Note: Integrate with react-use-audio-recorder or similar library
-              </p>
+
+              {/* Recording Error */}
+              {recordingError && (
+                <div className="mb-6 p-4 bg-red-500/20 border border-red-500/30 rounded-2xl">
+                  <p className="text-red-300 text-sm">{recordingError}</p>
+                </div>
+              )}
+
+              {/* Recording Controls */}
+              <div className="flex items-center justify-center space-x-4 mb-6">
+                {!isRecording ? (
+                  <button
+                    onClick={startRecording}
+                    className="flex items-center space-x-2 px-8 py-4 bg-gradient-to-r from-red-500 to-pink-600 hover:from-red-600 hover:to-pink-700 rounded-2xl font-bold text-white shadow-lg shadow-red-500/30 hover:shadow-red-500/50 transform hover:scale-105 transition-all duration-300"
+                  >
+                    <Mic className="w-5 h-5" />
+                    <span>Start Recording</span>
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={pauseRecording}
+                      className="flex items-center space-x-2 px-6 py-3 bg-yellow-500 hover:bg-yellow-600 rounded-xl font-medium text-white transition-colors duration-200"
+                    >
+                      {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                      <span>{isPaused ? 'Resume' : 'Pause'}</span>
+                    </button>
+                    
+                    <button
+                      onClick={stopRecording}
+                      className="flex items-center space-x-2 px-6 py-3 bg-red-500 hover:bg-red-600 rounded-xl font-medium text-white transition-colors duration-200"
+                    >
+                      <Square className="w-4 h-4" />
+                      <span>Stop</span>
+                    </button>
+                  </>
+                )}
+
+                {/* Reset button (only show if there's a recording) */}
+                {(file || recordingTime > 0) && (
+                  <button
+                    onClick={resetRecording}
+                    className="flex items-center space-x-2 px-6 py-3 bg-gray-600 hover:bg-gray-700 rounded-xl font-medium text-white transition-colors duration-200"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>Reset</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Instructions */}
+              <div className="space-y-2 text-sm text-gray-400">
+                <p>Click "Start Recording" to begin capturing bird sounds</p>
+                <p>Make sure your microphone is enabled and positioned to capture audio clearly</p>
+                <p>Recording will automatically stop after 60 seconds or when you click "Stop"</p>
+              </div>
             </div>
           )}
 
@@ -372,7 +623,7 @@ function PredictPage() {
                       <div className="flex-1 bg-gray-700 rounded-full h-3 max-w-xs">
                         <div 
                           className="bg-gradient-to-r from-green-500 to-blue-500 h-3 rounded-full transition-all duration-1000"
-                          style={{ width: confidenceVal }}
+                          style={{ width: `${confidenceVal}%` }}
                         />
                       </div>
                       <span className="text-2xl font-bold text-green-400">{confidenceVal}</span>
@@ -415,6 +666,7 @@ function PredictPage() {
                     className="group relative aspect-square bg-gradient-to-br from-black/40 to-black/20 backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden cursor-pointer transform hover:scale-105 transition-all duration-300 hover:shadow-2xl hover:shadow-purple-500/20"
                     onClick={() => setSelectedImage(image)}
                   >
+                    {console.log("Rendering image:", image.url)}
                     <img
                       src={image.url}
                       alt={image.alt}
@@ -423,8 +675,13 @@ function PredictPage() {
                       }`}
                       onLoad={() => handleImageLoad(image.id)}
                       onError={(e) => {
-                        // Fallback to placeholder if image fails to load
-                        e.target.style.display = 'none';
+                        console.error("Failed to load image:", image.url);
+                        // Try fallback to small size if medium fails
+                        if (image.smallUrl && e.target.src !== image.smallUrl) {
+                          e.target.src = image.smallUrl;
+                        } else {
+                          e.target.style.display = 'none';
+                        }
                       }}
                     />
                     
@@ -434,7 +691,6 @@ function PredictPage() {
                       </div>
                     )}
 
-                    {/* Overlay */}
                     <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
                       <div className="absolute bottom-4 left-4 right-4">
                         <p className="text-white font-semibold text-sm truncate">
@@ -445,12 +701,12 @@ function PredictPage() {
                             <button className="w-8 h-8 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white/40 transition-colors">
                               <Heart className="w-4 h-4" />
                             </button>
-                            <button className="w-8 h-8 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white/40 transition-colors">
+                            <button onClick={()=>handleDownload(image)} className="w-8 h-8 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white/40 transition-colors">
                               <Download className="w-4 h-4" />
                             </button>
                           </div>
-                          <button className="w-8 h-8 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white/40 transition-colors">
-                            <ExternalLink className="w-4 h-4" />
+                          <button onClick={()=>handleViewSource(image)} className="w-8 h-8 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white/40 transition-colors">
+                            <ExternalLink  className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
@@ -483,12 +739,12 @@ function PredictPage() {
                 <h4 className="text-2xl font-bold text-white mb-2">{val}</h4>
                 <p className="text-gray-300 mb-4">High-resolution reference image</p>
                 <div className="flex space-x-3">
-                  <button className="flex items-center space-x-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl hover:bg-white/20 transition-colors">
+                  <button onClick={()=>handleDownload(selectedImage)} className="flex items-center space-x-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl hover:bg-white/20 transition-colors">
                     <Download className="w-4 h-4" />
                     <span>Download</span>
                   </button>
-                  <button className="flex items-center space-x-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl hover:bg-white/20 transition-colors">
-                    <ExternalLink className="w-4 h-4" />
+                  <button onClick={()=>handleViewSource(selectedImage)} className="flex items-center space-x-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl hover:bg-white/20 transition-colors">
+                    <ExternalLink  className="w-4 h-4" />
                     <span>View Source</span>
                   </button>
                 </div>

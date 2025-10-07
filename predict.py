@@ -32,7 +32,8 @@ print(torchaudio.list_audio_backends())
 # Forward map: column name → index
 forward_map = {col: i for i, col in enumerate(df.columns[1:])}
 def get_species_list():
-    return forward_map.keys()
+    return taxonomy['scientific_name'].unique().tolist()
+
 # Reverse map: index → column name
 reverse_map = {i: col for col, i in forward_map.items()}
 
