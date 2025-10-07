@@ -140,17 +140,21 @@ cd <your-repo-directory>
 
 Here are some visuals of the application:
 
-- **Home Page (Grid View)**:
+- **Home Page (Upload)**:
 
-  ![Grid View](screenshots/grid-view.png)*Shows the grid layout with bird placeholders.*
+  ![Upload Audio](screenshots/Home_Page.png)
 
-- **Home Page (List View)**:
+- **Home Page (Record Sound)**:
 
-  ![List View](screenshots/list-view.png)*Displays the text-only list view of species names.*
+  ![Record Audio](screenshots/Sound_Record.png)
 
-- **Species Modal**:
+- **Species Predicted**:
 
-  ![Species Modal](screenshots/species-modal.png)*Shows the modal with an image, download, and view source options.*
+  ![Species Predicted](screenshots/Predicted.png)
+  
+- **Image Popup**:
+
+  ![Species Image](screenshots/Image_Popup.png)
 
 *Note*: Replace `screenshots/*.png` with actual image files. To add screenshots:
 
